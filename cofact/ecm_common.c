@@ -1,0 +1,1537 @@
+/*
+ * ecm_common.c
+ *
+ *  Created on: Aug 25, 2013
+ *      Author: pstach
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include "cofact_plan.h"
+
+/* Do we want backtracking when processing factors of 2 in E? */
+#ifndef ECM_BACKTRACKING
+/* Default is "yes." Set to 0 for "no." */
+#define ECM_BACKTRACKING 1
+#endif
+
+typedef struct
+{
+	ul x;
+	ul z;
+} ellM_point_t[1];
+
+typedef struct
+{
+	ul x;
+	ul y;
+} ellW_point_t[1];
+
+/* Functions for curves in Montgomery form */
+static inline void ellM_init(ellM_point_t P)
+{
+	ul_init(P->x);
+	ul_init(P->z);
+	return;
+}
+
+static inline void ellM_clear(ellM_point_t P)
+{
+	ul_clear(P->x);
+	ul_clear(P->z);
+	return;
+}
+
+static inline void ellM_set(ellM_point_t Q, ellM_point_t P)
+{
+	ul_set(Q->x, P->x);
+	ul_set(Q->z, P->z);
+	return;
+}
+
+static inline void ellM_swap(ellM_point_t Q, ellM_point_t P)
+{
+	ul tmp;
+
+	ul_init(tmp);
+	ul_set(tmp, Q->x);
+	ul_set(Q->x, P->x);
+	ul_set(P->x, tmp);
+	ul_set(tmp, Q->z);
+	ul_set(Q->z, P->z);
+	ul_set(P->z, tmp);
+	ul_clear(tmp);
+	return;
+}
+
+/* computes Q=2P, with 5 muls (3 muls and 2 squares) and 4 add/sub.
+ * m : number to factor
+ * b : (a+2)/4 mod n
+ * It is permissible to let P and Q use the same memory.
+ */
+
+static void ellM_double(ellM_point_t Q, ellM_point_t P, mod m, ul b)
+{
+	ul u, v, w;
+
+	ul_init(u);
+	ul_init(v);
+	ul_init(w);
+
+	ul_modadd(u, P->x, P->z, m);
+	ul_modmul(u, u, u, m); /* u = (x + z)^2 */
+	ul_modsub(v, P->x, P->z, m);
+	ul_modmul(v, v, v, m); /* v = (x - z)^2 */
+	ul_modmul(Q->x, u, v, m); /* x2 = (x^2 - z^2)^2 */
+	ul_modsub(w, u, v, m); /* w = 4 * x * z */
+	ul_modmul(u, w, b, m); /* u = x * z * (A + 2) */
+	ul_modadd(u, u, v, m); /* u = x^2 + x * z * A + z^2 */
+	ul_modmul(Q->z, w, u, m); /* Q_z = (4xz) * (x^2 + xzA + z^2) */
+
+	ul_clear(w);
+	ul_clear(v);
+	ul_clear(u);
+	return;
+}
+
+/* adds P and Q and puts the result in R,
+ * using 6 muls (4 muls and 2 squares), and 6 add/sub.
+ * One assumes that Q-R=D or R-Q=D.
+ * This function assumes that P !~= Q, i.e. that there is
+ * no t!=0 so that P->x = t*Q->x and P->z = t*Q->z, for otherwise the result
+ * is (0:0) although it shouldn't be (which actually is good for factoring!).
+ * R may be identical to P, Q and/or D.
+ */
+static void ellM_add(ellM_point_t R, ellM_point_t P, ellM_point_t Q, ellM_point_t D, ul b, mod m)
+{
+	ul u, v, w;
+
+	ul_init(u);
+	ul_init(v);
+	ul_init(w);
+
+	ul_modsub(u, P->x, P->z, m);
+	ul_modadd(v, Q->x, Q->z, m);
+	ul_modmul(u, u, v, m); /* u = (Px-Pz)*(Qx+Qz) */
+	ul_modadd(w, P->x, P->z, m);
+	ul_modsub(v, Q->x, Q->z, m);
+	ul_modmul(v, w, v, m); /* v = (Px+Pz)*(Qx-Qz) */
+	ul_modadd(w, u, v, m); /* w = 2*(Qx*Px - Qz*Pz)*/
+	ul_modsub(v, u, v, m); /* v = 2*(Qz*Px - Qx*Pz) */
+
+	ul_modmul(w, w, w, m); /* w = 4*(Qx*Px - Qz*Pz)^2 */
+	ul_modmul(v, v, v, m); /* v = 4*(Qz*Px - Qx*Pz)^2 */
+	ul_set(u, D->x); /* save D->x */
+	ul_modmul(R->x, w, D->z, m); /* may overwrite D->x */
+	ul_modmul(R->z, u, v, m);
+
+	ul_clear(w);
+	ul_clear(v);
+	ul_clear(u);
+	return;
+}
+
+
+/* (x:z) <- e*(x:z) (mod p) */
+static void ellM_mul_ul(ellM_point_t R, ellM_point_t P, unsigned long e, mod m, ul b)
+{
+	unsigned long l, n;
+	ellM_point_t t1, t2;
+
+	if(e == 0)
+	{
+		ul_set_ui(R->x, 0);
+		ul_set_ui(R->z, 0);
+		return;
+	}
+
+	if(e == 1)
+	{
+		ellM_set(R, P);
+		return;
+	}
+
+	if(e == 2)
+	{
+		ellM_double(R, P, m, b);
+		return;
+	}
+
+	if (e == 4)
+	{
+		ellM_double(R, P, m, b);
+		ellM_double(R, R, m, b);
+		return;
+	}
+
+	ellM_init(t1);
+
+	if(e == 3)
+	{
+		ellM_double(t1, P, m, b);
+		ellM_add(R, t1, P, P, b, m);
+		ellM_clear(t1);
+		return;
+	}
+
+	ellM_init(t2);
+	e--;
+
+	/* compute number of steps needed: we start from (1,2) and go from
+	 * (i,i+1) to (2i,2i+1) or (2i+1,2i+2)
+	 */
+	for(l = e, n = 0; l > 1; n ++, l /= 2);
+
+	/* start from P1=P, P2=2P */
+	ellM_set(t1, P);
+	ellM_double(t2, t1, m, b);
+
+	while(n--)
+	{
+		if((e >> n) & 1) /* (i,i+1) -> (2i+1,2i+2) */
+		{
+			/* printf ("(i,i+1) -> (2i+1,2i+2)\n"); */
+			ellM_add(t1, t1, t2, P, b, m);
+			ellM_double(t2, t2, m, b);
+		}
+		else /* (i,i+1) -> (2i,2i+1) */
+		{
+			/* printf ("(i,i+1) -> (2i,2i+1)\n"); */
+			ellM_add(t2, t1, t2, P, b, m);
+			ellM_double(t1, t1, m, b);
+		}
+	}
+
+	ellM_set(R, t2);
+
+	ellM_clear(t1);
+	ellM_clear(t2);
+	return;
+}
+
+
+/* Functions for curves in Weierstrass form */
+static inline void ellW_init(ellW_point_t P)
+{
+	ul_init(P->x);
+	ul_init(P->y);
+	return;
+}
+
+static inline void ellW_clear(ellW_point_t P)
+{
+	ul_clear(P->x);
+	ul_clear(P->y);
+	return;
+}
+
+static inline void ellW_set(ellW_point_t Q, ellW_point_t P)
+{
+	ul_set(Q->x, P->x);
+	ul_set(Q->y, P->y);
+	return;
+}
+#if 0
+static inline void ellW_swap(ellW_point_t Q, ellW_point_t P)
+{
+	ul tmp;
+
+	ul_init(tmp);
+	ul_set(tmp, Q->x);
+	ul_set(Q->x, P->x);
+	ul_set(P->x, tmp);
+	ul_set(tmp, Q->y);
+	ul_set(Q->y, P->y);
+	ul_set(P->y, tmp);
+	ul_clear(tmp);
+	return;
+}
+#endif
+
+/* R <- 2 * P for the curve y^2 = x^3 + a*x + b.
+ * For Weierstrass coordinates. Returns 1 if doubling worked normally,
+ * 0 if the result is point at infinity.
+ */
+
+static int ellW_double(ellW_point_t R, ellW_point_t P, ul a, mod m)
+{
+	ul lambda, u, v;
+
+	ul_init(lambda);
+	ul_init(u);
+	ul_init(v);
+
+	ul_modmul(u, P->x, P->x, m);
+	ul_modadd(v, u, u, m);
+	ul_modadd(v, v, u, m);
+	ul_modadd(v, v, a, m); /* 3x^2 + a */
+	ul_modadd(u, P->y, P->y, m);
+	if(!ul_modinv(u, u, m->n)) /* u = 1/(2*y) */
+	{
+		ul_clear(v);
+		ul_clear(u);
+		ul_clear(lambda);
+		return 0; /* y was 0  => result is point at infinity */
+	}
+
+	ul_to_montgomery(u, u, m);
+	ul_to_montgomery(u, u, m);
+
+	ul_modmul(lambda, u, v, m);
+	ul_modmul(u, lambda, lambda, m);
+	ul_modsub(u, u, P->x, m);
+	ul_modsub(u, u, P->x, m); /* x3 = u = lambda^2 - 2*x */
+	ul_modsub(v, P->x, u, m);
+	ul_modmul(v, v, lambda, m);
+	ul_modsub(R->y, v, P->y, m);
+	ul_set(R->x, u);
+
+	ul_clear(v);
+	ul_clear(u);
+	ul_clear(lambda);
+	return 1;
+}
+
+
+/* Adds two points P and Q on the curve y^2 = x^3 + a*x + b
+ * in Weierstrass coordinates and puts result in R.
+ * Returns 1 if the addition worked (i.e. the modular inverse existed)
+ * and 0 otherwise (resulting point is point at infinity)
+ */
+
+static int ellW_add(ellW_point_t R, ellW_point_t P, ellW_point_t Q, ul a, mod m)
+{
+	ul u, v;
+	int r;
+
+	ul_init(u);
+	ul_init(v);
+
+	ul_modsub(u, Q->y, P->y, m);
+	ul_modsub(v, Q->x, P->x, m);
+	ul_modinv(v, v, m->n);
+	if(ul_cmp_ui(v, 0) == 0)
+	{
+	  /* Maybe we were trying to add two identical points? If so,
+	   * use the ellW_double() function instead
+	   */
+		if(ul_cmp(P->x, Q->x) == 0 && ul_cmp(P->y, Q->y) == 0)
+			r = ellW_double(R, P, a, m);
+		else
+		{
+			/* Or maybe the points are negatives of each other? */
+			ul_modsub(u, m->n, P->y, m);
+			if(ul_cmp(P->x, Q->x) == 0 && ul_cmp(u, Q->y) == 0)
+				r = 0; /* Signal point at infinity */
+			else
+			{
+				/* Neither identical, nor negatives (mod m). Looks like we
+				 * found a proper factor. FIXME: What do we do with it?
+				 */
+				r = 0;
+			}
+		}
+	}
+	else
+	{
+		ul lambda;
+
+		ul_init(lambda);
+
+		ul_to_montgomery(v, v, m);
+		ul_to_montgomery(v, v, m);
+		ul_modmul(lambda, u, v, m);
+		ul_modmul(u, lambda, lambda, m);
+		ul_modsub(u, u, P->x, m);
+		ul_modsub(u, u, Q->x, m);    /* x3 = u = lambda^2 - P->x - Q->x */
+		ul_modsub(v, P->x, u, m);
+		ul_modmul(v, v, lambda, m);
+		ul_modsub(R->y, v, P->y, m);
+		ul_set(R->x, u);
+		ul_init(lambda);
+		r = 1;
+	}
+
+	ul_clear(v);
+	ul_clear(u);
+	return r;
+}
+
+
+/* (x,y) <- e * (x,y) on the curve y^2 = x^3 + a*x + b (mod m) */
+static int ellW_mul_ui(ellW_point_t P, unsigned long e, ul a, mod m)
+{
+	unsigned long i;
+	ellW_point_t T;
+	int tfinite; /* Nonzero iff T is NOT point at infinity */
+
+	if (e == 0)
+		return 0; /* signal point at infinity */
+
+	ellW_init(T);
+
+	i = ~(0UL);
+	i -= i/2;   /* Now the most significant bit of i is set */
+	while((i & e) == 0)
+		i >>= 1;
+
+	ellW_set(T, P);
+	tfinite = 1;
+	i >>= 1;
+
+	while (i > 0)
+	{
+		if(tfinite)
+			tfinite = ellW_double(T, T, a, m);
+		if(e & i)
+		{
+			if(tfinite)
+				tfinite = ellW_add(T, T, P, a, m);
+			else
+			{
+				ellW_set(T, P);
+				tfinite = 1;
+			}
+		}
+		i >>= 1;
+	}
+
+	if(tfinite)
+		ellW_set(P, T);
+
+	ellW_clear(T);
+
+	return tfinite;
+}
+
+
+/* Interpret the bytecode located at "code" and do the
+ * corresponding elliptic curve operations on (x::z)
+ */
+
+static void ellM_interpret_bytecode(ellM_point_t P, u_int8_t *code, mod m, ul b)
+{
+	ellM_point_t A, B, C, t, t2;
+
+	ellM_init(A);
+	ellM_init(B);
+	ellM_init(C);
+	ellM_init(t);
+	ellM_init(t2);
+
+	ellM_set(A, P);
+
+	/* Implicit init of first subchain */
+	ellM_set(B, A);
+	ellM_set(C, A);
+	ellM_double(A, A, m, b);
+
+	while(1)
+	{
+		switch (*code++)
+		{
+		  case 0: /* Swap A, B */
+			ellM_swap(A, B);
+			break;
+		  case 1:
+			ellM_add(t, A, B, C, b, m);
+			ellM_add(t2, t, A, B, b, m);
+			ellM_add(B, B, t, A, b, m);
+			ellM_set(A, t2);
+			break;
+		  case 2:
+			ellM_add(B, A, B, C, b, m);
+			ellM_double(A, A, m, b);
+			break;
+		  case 3:
+			ellM_add(C, B, A, C, b, m);
+			ellM_swap(B, C);
+			break;
+		  case 4:
+			ellM_add(B, B, A, C, b, m);
+			ellM_double(A, A, m, b);
+			break;
+		  case 5:
+			ellM_add(C, C, A, B, b, m);
+			ellM_double(A, A, m, b);
+			break;
+		  case 6:
+			ellM_double(t, A, m, b);
+			ellM_add(t2, A, B, C, b, m);
+			ellM_add(A, t, A, A, b, m);
+			ellM_add(C, t, t2, C, b, m);
+			ellM_swap(B, C);
+			break;
+		  case 7:
+			ellM_add(t, A, B, C, b, m);
+			ellM_add(B, t, A, B, b, m);
+			ellM_double(t, A, m, b);
+			ellM_add(A, A, t, A, b, m);
+			break;
+		  case 8:
+			ellM_add(t, A, B, C, b, m);
+			ellM_add(C, C, A, B, b, m);
+			ellM_swap(B, t);
+			ellM_double(t, A, m, b);
+			ellM_add(A, A, t, A, b, m);
+			break;
+		  case 9:
+			ellM_add(C, C, B, A, b, m);
+			ellM_double(B, B, m, b);
+			break;
+		case 10:
+			/* Combined final add of old subchain and init of new subchain */
+			ellM_add(A, A, B, C, b, m);
+			ellM_set(B, A);
+			ellM_set(C, A);
+			ellM_double(A, A, m, b);
+			break;
+		case 11: /* Combined rule 3 and rule 0 */
+			ellM_add(C, B, A, C, b, m);
+			ellM_swap(B, C);
+			ellM_swap(A, B);
+			break;
+		case 12: /* End of bytecode */
+			goto end_of_bytecode;
+		default:
+			printf("%s: unhandled bytecode byte: 0x%02x\n", __FUNCTION__, code[-1]);
+			exit(-1);
+			break;
+		}
+	}
+
+end_of_bytecode:
+	/* Implicit final add of last subchain */
+	ellM_add(A, A, B, C, b, m);
+
+	ellM_set(P, A);
+
+	ellM_clear(A);
+	ellM_clear(B);
+	ellM_clear(C);
+	ellM_clear(t);
+	ellM_clear(t2);
+	return;
+}
+
+
+/* Produces curve in Montgomery form from sigma value.
+ * Return 1 if it worked, 0 if a modular inverse failed.
+ * If modular inverse failed, return non-invertible value in x.
+ */
+static int Brent12_curve_from_sigma(ul A, ul x, ul sigma, mod m)
+{
+	ul u, v, t, b, z, one;
+	int r;
+
+	ul_init(u);
+	ul_init(v);
+	ul_init(t);
+	ul_init(b);
+	ul_init(z);
+	ul_init(one);
+
+	ul_set_ui(one, 1);
+	ul_to_montgomery(one, one, m);
+
+	/* compute b, x */
+	ul_modadd(v, sigma, sigma, m);
+	ul_modadd(v, v, v, m); /* v = 4*sigma */
+	ul_modmul(u, sigma, sigma, m);
+	ul_set(b, one);
+	ul_modadd(t, b, b, m);
+	ul_modadd(t, t, t, m);
+	ul_modadd(t, t, b, m); /* t = 5 */
+	ul_modsub(u, u, t, m); /* u = sigma^2 - 5 */
+	ul_modmul(t, u, u, m);
+	ul_modmul(x, t, u, m); /* x = u^3 */
+	ul_modmul(t, v, v, m);
+	ul_modmul(z, t, v, m); /* z = v^3 */
+	ul_modmul(t, x, v, m); /* t = x*v = u^3*v */
+	ul_modadd(b, t, t, m);
+	ul_modadd(b, b, b, m); /* b = 4*u^3*v */
+	ul_modadd(t, u, u, m);
+	ul_modadd(t, t, u, m); /* t = 3*u */
+	ul_modsub(u, v, u, m); /* t2 = v-u  (stored in u) */
+	ul_modadd(v, t, v, m); /* t3 = 3*u + v (stored in v) */
+	ul_modmul(t, u, u, m);
+	ul_modmul(u, t, u, m); /* t4 = (u-v)^3 (stored in u) */
+	ul_modmul(A, u, v, m); /* A = (u-v)^3 * (3*u + v) */
+	ul_modmul(v, b, z, m); /* t5 = b*z (stored in v) */
+
+	ul_from_montgomery(u, v, m);
+	ul_modinv(u, u, m->n); /* t6 = 1/(b*z) (stored in u) */
+	if(ul_cmp_ui(u, 0) == 0) /* non-trivial gcd */
+	{
+		ul_set(x, v);
+		r = 0;
+	}
+	else
+	{
+		ul_to_montgomery(u, u, m);
+		ul_modmul(v, u, b, m); /* t7 = 1/z (stored in v) */
+		ul_modmul(x, x, v, m); /* x := x/z */
+		ul_modmul(v, u, z, m); /* t8 = 1/b (stored in v) */
+		ul_modmul(t, A, v, m); /* t = A/b = (u-v)^3 * (3*u + v) / (4*u^3*v) */
+		ul_set(u, one);
+		ul_modadd(u, u, u, m);
+		ul_modsub(A, t, u, m); /* A = (u-v)^3 * (3*u + v) / (4*u^3*v) - 2 */
+		r = 1;
+	}
+
+	ul_clear(one);
+	ul_clear(z);
+	ul_clear(b);
+	ul_clear(t);
+	ul_clear(v);
+	ul_clear(u);
+	return r;
+}
+
+/* Produces curve in Montgomery parameterization from k value, using
+   parameters for a torsion 12 curve as in Montgomery's thesis (6.1).
+   Return 1 if it worked, 0 if a modular inverse failed.
+   If a modular inverse failed, the non-invertible value is stored in x.
+
+   The elliptic curve is B y^2 = x^3 + A x^2 + x
+
+   with A = (-3*a^4-6*a^2+1)/(4*a^3) = (1/a - 3*a*(a^2 + 2))/(2*a)^2
+   and B = (a^2-1)^2/(4*a^3).
+
+   and initial point x = (3*a^2+1)/(4*a).
+
+   A and x are obtained from u and v such that (u,v) = k*P on the curve
+   v^2 = u^3 - 12*u, where P = (-2, 4).
+
+   In Sage notation:
+   E=EllipticCurve([-12,0])
+   P=E(-2,4)
+   k=2
+   kP=k*P; u=kP[0]; v=kP[1]
+   t2 = (u^2-12)/(4*u)
+   a = (u^2 - 4*u - 12)/(u^2 + 12*u - 12)
+   A = (-3*a^4-6*a^2+1)/(4*a^3)
+   B = (a^2-1)^2/(4*a^3)
+   x = (3*a^2+1)/(4*a)
+
+   We want t^2 = (u^2-12)/4u, and a=(t^2-1)/(t^2+3), thus
+   a = (u^2 - 4*u - 12)/(u^2 + 12*u - 12).
+   We need both a and 1/a, so we can compute the inverses of both
+   u^2 - 4*u - 12 and u^2 + 12*u - 12 with a single batch inversion.
+
+   For k=2, we get u=4, v=-4, t=-1/2, a=-3/13,
+     A=-4798/351, B=-6400/351 and x=-49/39.
+
+   For k=3, we get u=-2/9, v=-44/27, t=11/3, a=28/37,
+     A=-6409583/3248896, B=342225/3248896, and x=3721/4144.
+*/
+static int Montgomery12_curve_from_k(ul A, ul x, const unsigned long k, mod m)
+{
+	ul u, v, a, t2, one, tmp;
+	int r = 0;
+
+	/* We want a multiple of the point (-2,4) on the curve Y^2=X^3-12*X.
+	 * The curve has 2-torsion with torsion point (0,0), but adding it
+	 * does not seem to change the ECM curve we get out in the end.
+	 */
+	ul_init(a);
+	ul_init(u);
+	ul_init(v);
+	ul_init(one);
+	ul_init(t2);
+	ul_init(tmp);
+
+	ul_set_ui(one, 1);
+	ul_to_montgomery(one, one, m);
+
+	if(k == 2)
+    {
+		/* For k=2, we need A=-4798/351 = -13 - 1/13 - 16/27 and x=-49/39 = 1/13 - 1/3 - 1. */
+		ul_moddiv13(u, one, m); /* u = 1/13 */
+		ul_moddiv3(v, one, m); /* v = 1/3 */
+		ul_modsub(x, u, v, m); /* x = 1/13 - 1/3 = -10/39 */
+		ul_modsub(x, x, one, m); /* x = -10/39 - 1 = -49/39 */
+		ul_modsub(A, one, v, m); /* A = 1 - 1/3 = 2/3 */
+		ul_moddiv3(A, A, m); /* A = 2/9 */
+		ul_modadd(A, A, one, m); /* A = 11/9 */
+		ul_moddiv3(A, A, m); /* A = 11/27 */
+		ul_modsub(A, A, one, m); /* A = -16/27 */
+		ul_modsub(A, A, u, m); /* A = -16/27 - 1/13 = -235/351 */
+		ul_modadd(u, one, one, m); /* u = 2 */
+		ul_modadd(u, u, one, m); /* u = 3 */
+		ul_modadd(u, u, u, m); /* u = 6 */
+		ul_modadd(u, u, u, m); /* u = 12 */
+		ul_modadd(u, u, one, m); /* u = 13 */
+		ul_modsub(A, A, u, m); /* A = -235/351 - 13 = -4798/351 */
+
+		r = 1;
+		goto clear_and_exit;
+    }
+	else if(k == 3)
+	{
+		ul_moddiv2(v, one, m); /* v = 1/2 */
+		ul_moddiv2(v, v, m); /* v = 1/4 */
+		ul_modadd(v, v, one, m); /* v = 5/4 */
+		ul_modadd(v, v, one, m); /* v = 9/4 */
+		ul_moddiv7(v, v, m); /* v = 9/28 */
+		ul_modadd(v, v, one, m); /* v = 37/28 = 1/a */
+
+		ul_modinv(a, v, m->n); /* a = 28/37 */
+		if(ul_cmp_ui(a, 0) == 0)
+		{
+			ul_set(x, v);
+			goto clear_and_exit;
+		}
+		ul_to_montgomery(a, a, m);
+		ul_to_montgomery(a, a, m);
+    }
+	else
+	{
+		ul_modadd(v, one, one, m); /* v = 2 */
+		ul_modsub(u, m->n, v, m); /* u = -2 */
+		ul_modadd(v, v, v, m); /* v = 4 */
+		ul_modadd(a, v, v, m); /* a = 8 */
+		ul_modadd(a, a, v, m); /* a = 12 */
+		ul_modsub(a, m->n, a, m); /* a = -12 */
+		{
+			ellW_point_t T;
+			ellW_init(T);
+			ul_set(T->x, u);
+			ul_set(T->y, v);
+			ellW_mul_ui(T, k, a, m);
+			ul_set(u, T->x);
+			ul_set(v, T->y);
+			ellW_clear(T);
+		}
+
+		/* Now we have an $u$ such that $v^2 = u^3-12u$ is a square */
+		/* printf ("Montgomery12_curve_from_k: u = %lu\n", mod_get_ul (u)); */
+
+		/* We want a = (u^2 - 4*u - 12)/(u^2 + 12*u - 12).
+		 * We need both $a$ and $1/a$, so we can compute the inverses of both
+		 * u^2 - 4*u - 12 and u^2 + 12*u - 12 with a single batch inversion.
+		 */
+
+		ul_modmul(t2, u, u, m); /* t2 = u^2 */
+		ul_modsub(u, u, one, m);
+		ul_modadd(u, u, u, m);
+		ul_modadd(u, u, u, m); /* u' = 4u - 4 */
+		ul_modsub(v, t2, u, m); /* v = u^2 - 4u + 4 */
+		ul_modadd(t2, t2, u, m);
+		ul_modadd(t2, t2, u, m);
+		ul_modadd(u, t2, u, m);  /* u'' = u^2 + 12u - 12 */
+		ul_modadd(t2, one, one, m);
+		ul_modadd(t2, t2, t2, m);
+		ul_modadd(t2, t2, t2, m);
+		ul_modadd(t2, t2, t2, m); /* t2 = 16 */
+		ul_modsub(v, v, t2, m); /* v = u^2 - 4u - 12 */
+
+		ul_modmul(t2, u, v, m);
+		ul_modinv(tmp, t2, m->n);
+		if(ul_cmp_ui(tmp, 0) == 0)
+		{
+			ul_set(x, t2);
+			goto clear_and_exit;
+		}
+		ul_set(t2, tmp);
+		ul_to_montgomery(t2, t2, m);
+		ul_to_montgomery(t2, t2, m);
+
+		/* Now:
+		 * u'' = u^2 + 12u - 12
+		 * v  = u^2 - 4u - 12
+		 * t2 = 1 / ( (u^2 + 12u - 12) * (u^2 - 4u - 12) ).
+		 * We want:
+		 * a   = (u^2 - 4u - 12)/(u^2 + 12u - 12) and
+		 * 1/a = (u^2 + 12u - 12)/(u^2 - 4u - 12)
+		 */
+		ul_modmul(a, v, v, m);
+		ul_modmul(a, a, t2, m);
+		ul_modmul(v, u, u, m);
+		ul_modmul(v, v, t2, m);
+	}
+
+	/* Here we have $a$ in a, $1/a$ in v */
+	ul_modmul(u, a, a, m); /* a^2 */
+	ul_modadd(A, u, one, m);
+	ul_modadd(A, A, one, m); /* a^2 + 2 */
+	ul_modadd(t2, A, A, m);
+	ul_modadd(A, A, t2, m); /* 3*(a^2 + 2) */
+	ul_modmul(t2, A, a, m);
+	ul_set(A, v);
+	ul_modsub(A, A, t2, m); /* 1/a - 3 a (a^2 + 2) */
+	ul_moddiv2(v, v, m); /* v = 1/(2a) */
+	ul_modmul(t2, v, v, m); /* t2 = 1/(2a)^2 */
+	ul_modmul(A, A, t2, m); /* A = [1/a - 3 a (a^2 + 2)]/(2a)^2 */
+
+	ul_modadd(x, u, u, m); /* 2a^2 */
+	ul_modadd(x, x, u, m); /* 3*a^2 */
+	ul_modadd(x, x, one, m); /* 3*a^2 + 1 */
+	ul_moddiv2(v, v, m); /* v = 1/(4a) */
+	ul_modmul(x, x, v, m);   /* x = (3*a^2 + 1)/(4a) */
+	r = 1;
+
+clear_and_exit:
+	ul_clear(tmp);
+	ul_clear(one);
+	ul_clear(t2);
+	ul_clear(v);
+	ul_clear(u);
+	ul_clear(a);
+	return r;
+}
+
+#if 0
+/* Produces curve in Montgomery parameterization from k value, using
+ * parameters for a torsion 16 curve as in Montgomery's thesis.
+ *
+ * Return 1 if it worked, 0 if a modular inverse failed.
+ * Currently can produce only one, hard-coded curve that is cheap
+ * to initialize
+ */
+
+static int Montgomery16_curve_from_k(ul b, ul x, unsigned long k, mod m)
+{
+	if(k == 1)
+	{
+		ul t;
+
+		ul_init(t);
+
+		/* x = 8/15 */
+		ul_set_ui(x, 8);
+		ul_set_ui(t, 15);
+		ul_modinv(t, t, m->n);
+		ul_to_montgomery(x, x, m);
+		ul_to_montgomery(t, t, m);
+		ul_modmul(x, x, t, m);
+
+		/* b = 83521/57600 */
+		ul_set_ui(b, 83521);
+		ul_set_ui(t, 57600);
+		ul_modinv(t, t, m->n);
+		ul_to_montgomery(b, b, m);
+		ul_to_montgomery(t, t, m);
+		ul_modmul(b, b, t, m);
+
+		ul_clear(t);
+	}
+	else
+	{
+		printf("invalid curve specified to Montgomery16_curve_from_k\n");
+		exit(-1);
+	}
+	return 1;
+}
+#endif
+
+#if 0
+/* Make a curve of the form y^2 = x^3 + a*x^2 + b with a valid point
+ * (x, y) from a curve Y^2 = X^3 + A*X^2 + X. The value of b will not
+ * be computed.
+ *
+ * x and X may be the same variable.
+ */
+
+static int curveW_from_Montgomery(ul a, ellW_point_t P, ul X, ul A, mod m)
+{
+	ul g, one;
+	int r;
+
+	ul_init(g);
+	ul_init(one);
+
+	ul_set_ui(one, 1);
+	ul_to_montgomery(one, one, m);
+
+	ul_modadd(g, X, A, m);
+	ul_modmul(g, g, X, m);
+	ul_modadd(g, g, one, m);
+	ul_modmul(g, g, X, m); /* G = X^3 + A*X^2 + X */
+	/* printf ("curveW_from_Montgomery: Y^2 = %lu\n", g[0]); */
+
+	/* Now (x,1) is on the curve G*Y^2 = X^3 + A*X^2 + X. */
+	r = mod_inv (g, g, m);
+	if(r != 0)
+	{
+		ul_set(P->y, g); /* y = 1/G */
+		mod_div3(a, A, m);
+		ul_modadd(P->x, X, a, m);
+		ul_modmul(P->x, P->x, g, m); /* x = (X + A/3)/G */
+		ul_modmul(a, a, A, m);
+		ul_modsub(a, one, a, m);
+		ul_modmul(a, a, g, m);
+		ul_modmul(a, a, g, m); /* a = (1 - (A^2)/3)/G^2 */
+	}
+	else
+		fprintf(stderr, "curveW_from_Montgomery: r = 0\n");
+
+	ul_clear(one);
+	ul_clear(g);
+	return r;
+}
+#endif
+
+/* Multiplies x[1] by z[2]*z[3]*z[4]...*z[n],
+ * x[2] by z[1]*z[3]*z[4]...*z[n] etc., generally
+ * x[i] by \prod_{1\leq j \leq n, j\neq i} z[j]
+ * Requires n > 1. Uses 4n-6 multiplications.
+ */
+
+static void common_z(const int n1, ul *x1, ul *z1, int n2, ul *x2, ul *z2, mod m)
+{
+	int n = n1 + n2;
+	int i, j;
+	ul *t, p;
+
+	// printf ("common_z: n1 = %d, n2 = %d, sum = %d, nr muls=%d\n",
+	//        n1, n2, n1 + n2, 4*(n1 + n2) - 6);
+
+	if (n < 2)
+		return;
+
+	t = (ul *) malloc (n * sizeof (ul));
+	for(i = 0; i < n; i++)
+		ul_init(t[i]);
+
+	/* Set t[i] = z_0 * z_1 * ... * z_n, where the z_i are taken
+	 * from the two lists z1 and z2
+	 */
+	i = j = 0;
+	if(n1 == 0)
+		ul_set(t[0], z2[j++]);
+	else
+		ul_set(t[0], z1[i++]);
+
+	for(; i < n1; i++)
+		ul_modmul(t[i], t[i - 1], z1[i], m);
+
+	for (; j < n2; j++)
+		ul_modmul(t[j + n1], t[j + n1 - 1], z2[j], m);
+
+	/* Now t[i] contains z_0 * ... * z_i */
+	ul_init(p);
+
+	i = n - 1;
+	if(i < n1)
+		ul_modmul(x1[i], x1[i], t[n - 2], m);
+	else
+		ul_modmul(x2[i - n1], x2[i - n1], t[n - 2], m);
+
+	if (n2 > 0)
+		ul_set(p, z2[n2 - 1]);
+	else
+		ul_set(p, z1[n1 - 1]);
+
+	for (i = n2 - 2; i > -n1 && i >= 0; i--)
+	{
+		/* Here p = z_{i+1} * ... * z_{n-1} */
+		ul_modmul(x2[i], x2[i], p, m);
+		ul_modmul(x2[i], x2[i], t[i + n1 - 1], m);
+		ul_modmul(p, p, z2[i], m);
+	}
+
+	/* n1 = 0  =>  i = 0 */
+	/* n1 > 0  =>  i = -1 or -2 */
+	for (i = i + n1 ; i > 0; i--)
+	{
+		/* Here p = z_{i+1} * ... * z_{n-1} */
+		ul_modmul(x1[i], x1[i], p, m);
+		ul_modmul(x1[i], x1[i], t[i-1], m);
+		ul_modmul(p, p, z1[i], m);
+	}
+
+	if (n1 > 0)
+		ul_modmul(x1[0], x1[0], p, m);
+	else
+		ul_modmul(x2[0], x2[0], p, m);
+
+	ul_clear(p);
+
+	for(i = 0; i < n; i++)
+		ul_clear(t[i]);
+	free(t);
+	return;
+}
+
+int ecm_stage2(ul r, ellM_point_t P, ul b, mod m, stage2_plan_t *plan)
+{
+	ellM_point_t Pd, Pt; /* d*P, i*d*P, (i+1)*d*P and a temp */
+	ul *Pid_x, *Pid_z, *Pj_x, *Pj_z; /* saved i*d*P, i0 <= i < i1,
+										and jP, j in S_1, x and z coordinate
+										stored separately */
+	ul a, a_bk, t;
+	unsigned int i, k, l;
+	int bt = 0;
+
+	ellM_init(Pd);
+	ellM_init(Pt);
+	ul_init(t);
+	ul_init(a);
+
+	Pj_x = (ul *) malloc(plan->n_S1 * sizeof(ul));
+	Pj_z = (ul *) malloc(plan->n_S1 * sizeof(ul));
+	Pid_x = (ul *) malloc((plan->i1 - plan->i0) * sizeof(ul));
+	Pid_z = (ul *) malloc((plan->i1 - plan->i0) * sizeof(ul));
+
+	for(i = 0; i < plan->n_S1; i++)
+	{
+		ul_init(Pj_x[i]);
+		ul_init(Pj_z[i]);
+	}
+	for(i = 0; i < plan->i1 - plan->i0; i++)
+	{
+		ul_init(Pid_x[i]);
+		ul_init(Pid_z[i]);
+	}
+
+	{
+		ul Px, Pz;
+		ul_init(Px);
+		ul_init(Pz);
+		ul_from_montgomery(Px, P->x, m);
+		ul_from_montgomery(Pz, P->z, m);
+/*
+	printf ("Stage 2: P = (%lu::%lu)\n",
+			ul_get_ui(Px), ul_get_ui(Pz));
+*/
+		ul_clear(Px);
+		ul_clear(Pz);
+	}
+
+  /* Compute jP for j in S_1. Compute all the j, 1 <= j < d/2, gcd(j,d)=1
+   * with two arithmetic progressions 1+6k and 5+6k (this assumes 6|d).
+   * We need two values of each progression (1, 7 and 5, 11) and the
+   * common difference 6. These can be computed with the Lucas chain
+   * 1, 2, 3, 5, 6, 7, 11 at the cost of 6 additions and 1 doubling.
+   * For d=210, generating all 24 desired values 1 <= j < 210/2, gcd(j,d)=1,
+   * takes 6+16+15=37 point additions. If d=30, we could use
+   * 1,2,3,4,6,7,11,13 which has 5 additions and 2 doublings
+   */
+	{
+		ellM_point_t ap1_0, ap1_1, ap5_0, ap5_1, P2, P6;
+		int i1, i5;
+
+		ellM_init(ap1_0);
+		ellM_init(ap1_1);
+		ellM_init(ap5_0);
+		ellM_init(ap5_1);
+		ellM_init(P6);
+		ellM_init(P2);
+
+		/* Init ap1_0 = 1P, ap1_1 = 7P, ap5_0 = 5P, ap5_1 = 11P and P6 = 6P */
+		ellM_set(ap1_0, P); /* ap1_0 = 1*P */
+		ellM_double(P2, P, m, b); /* P2 = 2*P */
+		ellM_add(P6, P2, P, P, b, m); /* P6 = 3*P (for now) */
+		ellM_add(ap5_0, P6, P2, P, b, m); /* 5*P = 3*P + 2*P */
+		ellM_double(P6, P6, m, b); /* P6 = 6*P = 2*(3*P) */
+		ellM_add(ap1_1, P6, P, ap5_0, b, m); /* 7*P = 6*P + P */
+		ellM_add(ap5_1, P6, ap5_0, P, b, m); /* 11*P = 6*P + 5*P */
+
+		/* Now we generate all the j*P for j in S_1 */
+		/* We treat the first two manually because those might correspond
+		 * to ap1_0 = 1*P and ap5_0 = 5*P
+		 */
+		k = 0;
+		if(plan->n_S1 > k && plan->S1[k] == 1)
+		{
+			ul_set(Pj_x[k], ap1_0->x);
+			ul_set(Pj_z[k], ap1_0->z);
+			k++;
+		}
+		if(plan->n_S1 > k && plan->S1[k] == 5)
+		{
+			ul_set(Pj_x[k], ap5_0->x);
+			ul_set(Pj_z[k], ap5_0->z);
+			k++;
+		}
+
+		i1 = 7;
+		i5 = 11;
+		while(k < plan->n_S1)
+		{
+			if (plan->S1[k] == i1)
+			{
+				ul_set(Pj_x[k], ap1_1->x);
+				ul_set(Pj_z[k], ap1_1->z);
+				k++;
+				continue;
+			}
+			if(plan->S1[k] == i5)
+			{
+				ul_set(Pj_x[k], ap5_1->x);
+				ul_set(Pj_z[k], ap5_1->z);
+				k++;
+				continue;
+			}
+
+			ellM_add(Pt, ap1_1, P6, ap1_0, b, m);
+			ellM_set(ap1_0, ap1_1);
+			ellM_set(ap1_1, Pt);
+			i1 += 6;
+
+			ellM_add(Pt, ap5_1, P6, ap5_0, b, m);
+			ellM_set(ap5_0, ap5_1);
+			ellM_set(ap5_1, Pt);
+			i5 += 6;
+		}
+
+		if((unsigned) (i1 + i5) < plan->d)
+		{
+			if(i1 < i5)
+			{
+				ellM_add(Pt, ap1_1, P6, ap1_0, b, m);
+				ellM_set(ap1_0, ap1_1);
+				ellM_set(ap1_1, Pt);
+				i1 += 6;
+			}
+			else
+			{
+				ellM_add(Pt, ap5_1, P6, ap5_0, b, m);
+				ellM_set(ap5_0, ap5_1);
+				ellM_set(ap5_1, Pt);
+				i5 += 6;
+			}
+		}
+/*
+		if(i1 + i5 != plan->d)
+		{
+			printf("BAD i1 i5\n");
+			exit(-1);
+		}
+*/
+		if(i1 + 4 == i5)
+		{
+			ellM_double(P2, P2, m, b); /* We need 4P for difference */
+			ellM_add(Pd, ap1_1, ap5_1, P2, b, m);
+		}
+		else if (i5 + 2 == i1)
+		{
+			ellM_add(Pd, ap1_1, ap5_1, P2, b, m);
+		}
+/*
+		else
+		{
+			printf("BAD i1 + i5 #2\n");
+			exit(-1);
+		}
+*/
+		ellM_clear(ap1_0);
+		ellM_clear(ap1_1);
+		ellM_clear(ap5_0);
+		ellM_clear(ap5_1);
+		ellM_clear(P6);
+		ellM_clear(P2);
+	}
+/*
+	{
+		ul Pjx, Pjz, Pdx, Pdz;
+
+		ul_init(Pjx);
+		ul_init(Pjz);
+		ul_init(Pdx);
+		ul_init(Pdz);
+
+		printf ("Pj = [");
+		for (i = 0; i < plan->n_S1; i++)
+		{
+			ul_from_montgomery(Pjx, Pj_x[i], m);
+			ul_from_montgomery(Pjz, Pj_z[i], m);
+			printf ("%s(%lu::%lu)", (i>0) ? ", " : "",
+					ul_get_ui(Pjx), ul_get_ui(Pjz));
+		}
+		ul_from_montgomery(Pdx, Pd->x, m);
+		ul_from_montgomery(Pdz, Pd->z, m);
+		printf ("]\nPd = (%lu::%lu)\n",
+				ul_get_ui(Pdx), ul_get_ui(Pdz));
+	}
+*/
+	/* Compute idP for i0 <= i < i1 */
+	{
+		ellM_point_t Pid, Pid1;
+
+		ellM_init(Pid);
+		ellM_init(Pid1);
+		k = 0; i = plan->i0;
+
+		/* If i0 == 0, we simply leave the first point at (0::0) which is the point at infinity */
+		if (plan->i0 == 0)
+		{
+			ul_set_ui(Pid_x[k], 0);
+			ul_set_ui(Pid_z[k], 0);
+			k++;
+			i++;
+		}
+
+		/* Todo: do both Pid and Pid1 with one addition chain */
+		ellM_mul_ul(Pid, Pd, i, m, b); /* Pid = i_0 d * P */
+		ul_set(Pid_x[k], Pid->x);
+		ul_set(Pid_z[k], Pid->z);
+		k++; i++;
+
+		if(i < plan->i1)
+		{
+			ellM_mul_ul(Pid1, Pd, i, m, b); /* Pid = (i_0 + 1) d * P */
+			ul_set(Pid_x[k], Pid1->x);
+			ul_set(Pid_z[k], Pid1->z);
+			k++; i++;
+		}
+
+		while (i < plan->i1)
+		{
+			ellM_add(Pt, Pid1, Pd, Pid, b, m);
+			ellM_set(Pid, Pid1);
+			ellM_set (Pid1, Pt);
+			ul_set(Pid_x[k], Pt->x);
+			ul_set(Pid_z[k], Pt->z);
+			k++; i++;
+		}
+
+		ellM_clear(Pid);
+		ellM_clear(Pid1);
+	}
+/*
+	{
+		ul Px, Pz;
+
+		ul_init(Px);
+		ul_init(Pz);
+
+	printf ("Pid = [");
+	for (i = 0; i < plan->i1 - plan->i0; i++)
+	{
+		ul_from_montgomery(Px, Pid_x[i], m);
+				ul_to_montgomery(Pz, Pid_z[i], m);
+		printf ("%s(%lu:%lu)", (i>0) ? ", " : "",
+				ul_get_ui(Px), ul_get_ui(Pz));
+	}
+	printf ("]\n");
+	}
+*/
+	/* Now we've computed all the points we need, so multiply each by
+	 * the Z-coordinates of all the others, using Zimmermann's
+	 * two product-lists trick.
+	 * If i0 == 0, then Pid[0] is the point at infinity (0::0),
+	 * so we skip that one
+	 */
+	{
+		int skip = (plan->i0 == 0) ? 1 : 0;
+		common_z(plan->n_S1, Pj_x, Pj_z, plan->i1 - plan->i0 - skip,
+				Pid_x + skip, Pid_z + skip, m);
+	}
+/*
+	{
+		ul Px, Pz;
+
+		ul_init(Px);
+		ul_init(Pz);
+		printf ("After canonicalizing:\nPj = [");
+		for (i = 0; i < plan->n_S1; i++)
+		{
+			ul_from_montgomery(Px, Pj_x[i], m);
+			ul_from_montgomery(Pz, Pj_z[i], m);
+			printf ("%s(%lu:%lu)", (i>0) ? ", " : "",
+					ul_get_ui(Px), ul_get_ui(Pz));
+		}
+		printf ("]\n");
+
+		printf ("Pid = [");
+		for (i = 0; i < plan->i1 - plan->i0; i++)
+		{
+			ul_from_montgomery(Px, Pid_x[i], m);
+			ul_from_montgomery(Pz, Pid_z[i], m);
+
+			printf ("%s(%lu:%lu)", (i>0) ? ", " : "",
+					ul_get_ui(Px), ul_get_ui(Pz));
+		}
+		printf ("]\n");
+	}
+*/
+	/* Now process all the primes p = id - j, B1 < p <= B2 and multiply
+	 * (id*P)_x - (j*P)_x to the accumulator
+	 */
+
+	/* Init the accumulator to Pj[0], which contains the product of
+	 * the Z-coordinates of all the precomputed points, except Pj_z[0]
+	 * which is equal to P, and we know that one is coprime to the modulus.
+	 * Maybe one of the others was zero (mod p) for some prime factor p.
+	 */
+
+	ul_set(a, Pj_x[0]);
+	ul_init(a_bk); /* Backup value of a, in case we get a == 0 */
+	ul_set(a_bk, a);
+
+	i = 0;
+	l = 0;
+	unsigned char j = plan->pairs[0];
+
+	while (j != NEXT_PASS)
+	{
+		__asm__ volatile ("# ECM stage 2 loop here");
+		while (j < NEXT_D && j < NEXT_PASS)
+		{
+			ul_modsub(t, Pid_x[i], Pj_x[j], m);
+			j = plan->pairs[++l];
+			ul_modmul(a, a, t, m);
+		}
+
+#if ECM_BACKTRACKING
+		/* See if we got a == 0. If yes, restore previous a value and
+		 * end stage 2. Let's hope not all factors were found since
+		 * the last d increase.
+		 */
+		if(ul_cmp_ui(a, 0) == 0)
+		{
+			ul_set(a, a_bk);
+			bt = 1;
+			break;
+		}
+		ul_set(a_bk, a); /* Save new a value */
+#endif
+
+		if (j == NEXT_D)
+		{
+			i++;
+			j = plan->pairs[++l];
+		}
+	}
+/*
+	{
+		ul am;
+		ul_init(am);
+
+		ul_from_montgomery(am, a, m);
+		printf("Accumulator = %lu\n", ul_get_ui(am));
+		ul_clear(am);
+	}
+*/
+	ul_set(r, a);
+
+	/* Clear everything */
+	for(i = 0; i < plan->n_S1; i++)
+	{
+	  ul_clear(Pj_x[i]);
+	  ul_clear(Pj_z[i]);
+	}
+	free(Pj_x);
+	free(Pj_z);
+
+	for(i = 0; i < plan->i1 - plan->i0; i++)
+	{
+		ul_clear(Pid_x[i]);
+		ul_clear(Pid_z[i]);
+	}
+	free(Pid_x);
+	free(Pid_z);
+
+	ellM_clear(Pt);
+	ul_clear(t);
+	ul_clear(a);
+	ul_clear(a_bk);
+	ul_gcd(r, r, m->n);
+	return bt;
+}
+
+/* Stores any factor found in f_out (1 if no factor found).
+   If back-tracking was used, returns 1, otherwise returns 0. */
+
+int ecm_stage1(ul f, ellM_point_t P, ul b, mod m, ecm_plan_t *plan)
+{
+	ul u, r;
+	ellM_point_t Pt;
+	unsigned int i;
+	int bt = 0;
+
+	ul_init(u);
+	ul_init(r);
+
+	ul_set_ui(f, 1);
+
+	if(plan->parameterization == BRENT12)
+	{
+		ul s, A;
+
+		ul_init(s);
+		ul_init(A);
+		ul_set_ui(s, plan->sigma);
+		ul_to_montgomery(s, s, m);
+		if(Brent12_curve_from_sigma(A, P->x, s, m) == 0)
+		{
+			ul_gcd(f, P->x, m->n);
+			ul_clear(u);
+			ul_clear(A);
+			ul_clear(b);
+			ul_clear(s);
+			return 0;
+		}
+		ul_clear(s);
+		ul_set_ui(P->z, 1);
+		ul_to_montgomery(P->z, P->z, m);
+		ul_moddiv2(A, A, m);
+		ul_set(b, P->z);
+		ul_modadd(b, b, A, m);
+		ul_moddiv2(b, b, m);
+		ul_clear(A);
+	}
+	else if (plan->parameterization == MONTY12)
+	{
+		ul A;
+
+		ul_init(A);
+		if(Montgomery12_curve_from_k(A, P->x, plan->sigma, m) == 0)
+		{
+			ul_gcd(f, P->x, m->n);
+			ul_clear(u);
+			ul_clear(A);
+			ul_clear(b);
+			return 0;
+		}
+/*
+		{
+			ul Am;
+
+			ul_init(Am);
+			ul_from_montgomery(Am, A, m);
+			printf("A = %lu\n", ul_get_ui(Am));
+			ul_from_montgomery(Am, P->x, m);
+			printf("P->x = %lu\n", ul_get_ui(Am));
+		}
+*/
+		ul_set_ui(P->z, 1);
+		ul_to_montgomery(P->z, P->z, m);
+		ul_moddiv2(A, A, m);
+		ul_set(b, P->z);
+		ul_modadd(b, b, A, m);
+		ul_moddiv2(b, b, m);
+		ul_clear(A);
+	}
+#if 0
+	else if (plan->parameterization == MONTY16)
+	{
+		if(Montgomery16_curve_from_k(b, P->x, plan->sigma, m) == 0)
+		{
+			ul_gcd(f, P->x, m->n);
+			ul_clear(u);
+			ul_clear(b);
+			return 0;
+		}
+		ul_set_ui(P->z, 1);
+		ul_to_montgomery(P->z, P->z, m);
+	}
+#endif
+	else
+	{
+		fprintf (stderr, "ecm: Unknown parameterization\n");
+		exit(-1);
+	}
+/*
+	{
+		ul Px, Pz, bn;
+
+		ul_init(Px);
+		ul_init(Pz);
+		ul_init(bn);
+
+		ul_from_montgomery(Px, P->x, m);
+		ul_from_montgomery(Pz, P->z, m);
+		ul_from_montgomery(bn, b, m);
+		printf("starting point: (%lu::%lu) on curve y^2 = x^3 + (%lu*4-2)*x^2 + x\n",
+			ul_get_ui(Px), ul_get_ui(Pz), ul_get_ui(bn));
+		ul_clear(Px);
+		ul_clear(Pz);
+		ul_clear(bn);
+	}
+*/
+	/* now start ecm */
+
+	/* Do stage 1 */
+	ellM_interpret_bytecode(P, plan->bc, m, b);
+/*
+	{
+		ul Px, Pz, bn;
+
+		ul_init(Px);
+		ul_init(Pz);
+		ul_init(bn);
+
+		ul_from_montgomery(Px, P->x, m);
+		ul_from_montgomery(Pz, P->z, m);
+		ul_from_montgomery(bn, b, m);
+		printf("bytecode point: (%lu::%lu) on curve y^2 = x^3 + (%lu*4-2)*x^2 + x\n",
+			ul_get_ui(Px), ul_get_ui(Pz), ul_get_ui(bn));
+		ul_clear(Px);
+		ul_clear(Pz);
+		ul_clear(bn);
+	}
+*/
+	/* Add prime 2 in the desired power. If a zero residue for the
+	 * Z-coordinate is encountered, we backtrack to previous point and stop.
+	 * NOTE: This is not as effective as I hoped. It prevents trivial
+	 * factorizations only if after processing the odd part of the stage 1
+	 * multiplier, the resulting point has power-of-2 order on E_p for all p|N.
+	 * If that were to happen, the point probably had that (presumably small
+	 * on most E_p) power-of-2 order during the last couple of primes processed
+	 * in the precomputed Lucas chain, and then quite likely the Lucas chain
+	 * incorrectly used an addition of identical points, causing the
+	 * Z-coordinate to become zero, leading to 0 (mod N) before we even
+	 * get here.
+	 *
+	 * For example, using 10^6 composites from an RSA155 sieving experiment,
+	 * without backtracking we get N as the factor 456 times, with backtracking
+	 * still 360 times.
+	 * TODO: this could probably be fixed by treating 3 separately, too,
+	 * instead of putting it in the precomputed Lucas chain. Then the
+	 * probability that a point of very small order on all E_p is encountered
+	 * during the Lucas chain is reduced, and so the probability of using
+	 * curve addition erroneously.
+	 */
+
+	ellM_init(Pt);
+	ellM_set(Pt, P);
+
+	for (i = 0; i < plan->exp2; i++)
+	{
+		ellM_double(P, P, m, b);
+#if ECM_BACKTRACKING
+		if(ul_cmp_ui(P->z, 0) == 0)
+		{
+			ellM_set(P, Pt);
+			bt = 1;
+			break;
+		}
+		ellM_set(Pt, P);
+#endif
+	}
+/*
+	{
+		ul Px, Pz;
+
+		ul_init(Px);
+		ul_init(Pz);
+
+		ul_from_montgomery(Px, P->x, m);
+		ul_from_montgomery(Pz, P->z, m);
+
+		printf("After stage 1, P = (%lu: :%lu), bt = %d, i = %d, exp2 = %d\n",
+			ul_get_ui(Px), ul_get_ui(Pz), bt, i, plan->exp2);
+		ul_clear(Px);
+		ul_clear(Pz);
+	}
+*/
+	ul_gcd(f, P->z, m->n);
+/*
+	{
+		ul fn;
+
+		ul_init(fn);
+
+		ul_from_montgomery(fn, f, m);
+
+		printf("f = %lu\n", ul_get_ui(fn));
+		ul_clear(fn);
+	}
+*/
+	ul_clear(u);
+	ul_clear(r);
+	ellM_clear(Pt);
+	return bt;
+}

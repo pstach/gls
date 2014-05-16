@@ -1,0 +1,50 @@
+
+#ifndef COFACT_PLAN_H__
+#define COFACT_PLAN_H__
+
+#ifndef NEXT_D
+#define NEXT_D 254
+#endif
+
+#ifndef NEXT_PASS
+#define NEXT_PASS 255
+#endif
+
+#define BRENT12 0
+#define MONTY12 1
+
+typedef struct pm1_plan_s {
+	uint64_t E_mask;
+	uint32_t E_n_words;
+	uint32_t exp2;
+	uint32_t B1;
+	uint32_t B2;
+} pm1_plan_t;
+
+
+typedef struct pp1_plan_s {
+	uint32_t bc_len; /* Number of bytes in bytecode */
+	uint32_t exp2; /* Exponent of 2 in stage 1 primes */
+	uint32_t B1;
+} pp1_plan_t;
+
+typedef struct ecm_plan_s {
+	uint32_t bc_len; /* Number of bytes in bytecode */
+	uint32_t exp2; /* Exponent of 2 in stage 1 primes */
+	uint32_t B1;
+	int parameterization; /* BRENT12 or MONTY12 */
+	uint64_t sigma; /* Sigma parameter for Brent curves, or multiplier for Montgomery torsion-12 curves */
+} ecm_plan_t;
+
+typedef struct stage2_plan_s
+{
+	unsigned int B2;
+	unsigned int d;
+	unsigned int i0, i1;
+	unsigned int n_S1;
+	/* u_int32_t *S1; */
+	/* unsigned char *pairs; */
+	unsigned int n_pairs;
+} stage2_plan_t;
+
+#endif /* COFACT_PLAN_H__ */

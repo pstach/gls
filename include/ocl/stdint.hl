@@ -1,0 +1,29 @@
+
+#ifndef STDINT_HL_
+#define STDINT_HL_
+
+typedef uchar uint8_t;
+typedef int   int32_t;
+typedef uint  uint32_t;
+typedef long  int64_t;
+typedef ulong uint64_t;
+
+/* #define UL32_ADDC_64BIT */
+
+inline uint32_t ul32_addc(uint32_t *dst, const uint32_t *a, const uint32_t *b) {
+#ifdef UL32_ADDC_64BIT
+	uint64_t c = ((uint64_t)*a) + ((uint64_t)*b);
+	*dst = c;
+	return (c >> 32);
+#else
+	uint32_t r = 0;
+	
+	uint32_t c = (*a & 0x7fffffff) + (*b & 0x7fffffff);
+	r = (*a >> 31) + (*b >> 31) + (c >> 31);
+	*dst = (r << 31) | (c & 0x7fffffff);
+	
+	return (r >> 1);
+#endif
+}
+
+#endif /* STDINT_HL_ */

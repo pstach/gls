@@ -1,0 +1,30 @@
+
+#ifndef RNG_HL_
+#define RNG_HL_
+
+#include "stdint.hl"
+
+struct rng_t {
+	uint64_t u;
+	uint64_t v;
+	uint64_t w;
+};
+
+uint64_t rand_uint64(struct rng_t *r) {
+	r->u = r->u * 2862933555777941757L + 7046029254386353087L;
+    r->v ^= r->v >> 17; r->v ^= r->v << 31; r->v ^= r->v >> 8;
+    r->w = 4294957665U * (r->w & 0xffffffff) + (r->w >> 32);
+    uint64_t x = r->u ^ (r->u << 21); x ^= x >> 35; x ^= x << 4;
+    return (x + r->v) ^ r->w;
+}
+
+void rand_init(uint64_t j, struct rng_t *r) {
+    r->v = 4101842887655102017L;
+    r->w = 1;
+
+    r->u = j ^ r->v; rand_uint64(r);
+    r->v = r->u; rand_uint64(r);
+    r->w = r->v; rand_uint64(r);
+}
+
+#endif /* RNG_HL_ */

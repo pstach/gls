@@ -1,0 +1,353 @@
+/*
+ * kernels.hl
+ *
+ *  Created on: January 28, 2014
+ *      Author: tcarstens
+ */
+
+#include "../../include/ocl/cofact/pm1_common.hl"
+#include "../../include/ocl/cofact/pp1_common.hl"
+#include "../../include/ocl/cofact/ecm_common.hl"
+
+
+
+/***********************************************************
+ *                                                         *
+ * ECM                                                     *
+ *                                                         *
+ ***********************************************************/
+
+
+__kernel void kern_ecm_reorder(__global int *perm,
+                               __global ul *in_f,
+                               __global ul *out_f,
+                               __global ellM_point_t *in_X,
+                               __global ellM_point_t *out_X,
+                               __global ul *in_b,
+                               __global ul *out_b,
+                               __global ul *in_n,
+                               __global ul *out_n,
+                               int n_batch) {
+    int my_gid = get_global_id(0);
+
+    if (my_gid < n_batch) {
+        perm[my_gid] = my_gid;
+        ul_set_gg(out_f[my_gid], in_f[my_gid]);
+        ul_set_gg(out_b[my_gid], in_b[my_gid]);
+        ul_set_gg(out_X[my_gid]->x, in_X[my_gid]->x);
+        ul_set_gg(out_X[my_gid]->z, in_X[my_gid]->z);
+        ul_set_gg(out_n[my_gid], in_n[my_gid]);
+    }
+}
+
+
+__kernel void kern_ecm_stage1(__global ul *f,
+                              __global ellM_point_t *X,
+                              __global ul *b,
+                              __global ul *n,
+                              __global ecm_plan_t *plan,
+                              __local ecm_plan_t *local_plan,
+                              __global uint8_t *bc,
+                              __local uint8_t *local_bc,
+                              int n_batch) {
+    if (get_local_id(0) == 0) {
+        /* copy the global plan, bc to local memory */
+        local_plan->bc_len = plan->bc_len;
+        local_plan->exp2 = plan->exp2;
+        local_plan->B1 = plan->B1;
+        local_plan->parameterization = plan->parameterization;
+        local_plan->sigma = plan->sigma;
+
+        for (int i = 0; i < local_plan->bc_len; i++)
+            local_bc[i] = bc[i];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+	int my_gid = get_global_id(0);
+	if (my_gid < n_batch) {
+	    ul l_f = { 0 };
+        ul_set_ui(l_f, 1);
+	    ul l_b = { 0 };
+	    ellM_point_t l_X = { 0 };
+
+	    mod nn = { 0 };
+	    ul l_n = { 0 };
+        ul_set_pg(l_n, n[my_gid]);
+	    mod_set(nn, l_n);
+        
+	    ecm_stage1(l_f, l_X, l_b, nn, local_plan, local_bc);
+	    if (ul_cmp(l_f, l_n) == 0)
+	        ul_set_ui(l_f, 1);
+	
+	    ul_set_gp(f[my_gid], l_f);
+	    ul_set_gp(b[my_gid], l_b);
+	    ul_set_gp(X[my_gid]->x, l_X->x);
+	    ul_set_gp(X[my_gid]->z, l_X->z);
+    }
+}
+
+
+__kernel void kern_ecm_stage2(__global ul *f,
+							  __global ellM_point_t *X,
+                              __global ul *b,
+							  __global ul *n,
+							  
+							  __global stage2_plan_t *stage2_plan,
+                              __local stage2_plan_t *local_stage2_plan,
+							  __global uint32_t *S1,
+                              __local uint32_t *local_S1,
+							  __global unsigned char *pairs,
+                              __local unsigned char *local_pairs,
+							  int n_batch) {
+    if (get_local_id(0) == 0) {
+        /* copy the plan to local mem */
+        local_stage2_plan->B2 = stage2_plan->B2;
+        local_stage2_plan->d = stage2_plan->d;
+        local_stage2_plan->i0 = stage2_plan->i0;
+        local_stage2_plan->i1 = stage2_plan->i1;
+        local_stage2_plan->n_S1 = stage2_plan->n_S1;
+        local_stage2_plan->n_pairs = stage2_plan->n_pairs;
+
+        for (int i = 0; i < local_stage2_plan->n_S1; i++)
+            local_S1[i] = S1[i];
+
+        for (int i = 0; i < local_stage2_plan->n_pairs; i++)
+            local_pairs[i] = pairs[i];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+	int my_gid = get_global_id(0);
+    if (my_gid < n_batch) {
+	    ul l_f = { 0 };
+	    ul_set_pg(l_f, f[my_gid]);
+
+	    if(ul_cmp_ui(l_f, 1) != 0) {
+        }
+        else {
+	        ul l_b = { 0 };
+            ellM_point_t l_X = { 0 };
+
+            mod nn = { 0 };
+            ul l_n = { 0 };
+
+	        ul_set_pg(l_X->x, X[my_gid]->x);
+	        ul_set_pg(l_X->z, X[my_gid]->z);
+	        ul_set_pg(l_b, b[my_gid]);
+            ul_set_pg(l_n, n[my_gid]);
+            mod_set(nn, l_n);
+
+	        ecm_stage2(l_f, l_X, l_b, nn, local_stage2_plan, local_S1, local_pairs);
+
+	        ul_set_gp(f[my_gid], l_f);
+	        ul_set_gp(b[my_gid], l_b);
+	        ul_set_gp(X[my_gid]->x, l_X->x);
+	        ul_set_gp(X[my_gid]->z, l_X->z);
+        }
+    }
+}
+
+
+
+
+
+/***********************************************************
+ *                                                         *
+ * P + 1                                                   *
+ *                                                         *
+ ***********************************************************/
+
+
+__kernel void kern_pp1_reorder(__global int *perm,
+                               __global ul *in_f,
+                               __global ul *out_f,
+                               __global ul *in_X,
+                               __global ul *out_X,
+                               __global ul *in_n,
+                               __global ul *out_n,
+                               int n_batch) {
+    int my_gid = get_global_id(0);
+
+    if (my_gid < n_batch) {
+        perm[my_gid] = my_gid;
+        ul_set_gg(out_f[my_gid], in_f[my_gid]);
+        ul_set_gg(out_X[my_gid], in_X[my_gid]);
+        ul_set_gg(out_n[my_gid], in_n[my_gid]);
+    }
+}
+
+
+__kernel void kern_pp1_stage1(__global ul *f,
+                              __global ul *X,
+                              __global ul *n,
+                              __global pp1_plan_t *plan,
+                              __local pp1_plan_t *local_plan,
+                              __global uint8_t *bc,
+                              __local uint8_t *local_bc,
+                              int n_batch) {
+    if (get_local_id(0) == 0) {
+        /* copy the plan to local mem */
+        local_plan->bc_len = plan->bc_len;
+        local_plan->exp2 = plan->exp2;
+        local_plan->B1 = plan->B1;
+
+        for (int i = 0; i < local_plan->bc_len; i++)
+            local_bc[i] = bc[i];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+	int my_gid = get_global_id(0);
+    if (my_gid < n_batch) {
+        ul l_f = { 0 };
+        ul_set_ui(l_f, 1);
+        ul l_X = { 0 };
+
+	    mod nn = { 0 };
+	    ul l_n = { 0 };
+        ul_set_pg(l_n, n[my_gid]);
+	    mod_set(nn, l_n);
+        
+	    pp1_stage1(l_f, l_X, nn, local_plan, local_bc);
+	    if (ul_cmp(l_f, l_n) == 0)
+	        ul_set_ui(l_f, 1);
+	
+	    ul_set_gp(f[my_gid], l_f);
+	    ul_set_gp(X[my_gid], l_X);
+    }
+}
+
+
+__kernel void kern_pp1_stage2(__global ul *f,
+							  __global ul *X,
+							  __global ul *n,
+							  
+							  __global stage2_plan_t *stage2_plan,
+							  __local stage2_plan_t *local_stage2_plan,
+							  __global uint32_t *S1,
+							  __local uint32_t *local_S1,
+							  __global unsigned char *pairs,
+							  __local unsigned char *local_pairs,
+							  int n_batch) {
+    if (get_local_id(0) == 0) {
+        /* copy the plan to local mem */
+        local_stage2_plan->B2 = stage2_plan->B2;
+        local_stage2_plan->d = stage2_plan->d;
+        local_stage2_plan->i0 = stage2_plan->i0;
+        local_stage2_plan->i1 = stage2_plan->i1;
+        local_stage2_plan->n_S1 = stage2_plan->n_S1;
+        local_stage2_plan->n_pairs = stage2_plan->n_pairs;
+
+        for (int i = 0; i < local_stage2_plan->n_S1; i++)
+            local_S1[i] = S1[i];
+
+        for (int i = 0; i < local_stage2_plan->n_pairs; i++)
+            local_pairs[i] = pairs[i];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+	int my_gid = get_global_id(0);
+    if (my_gid < n_batch) {
+	    ul l_f = { 0 };
+	    ul_set_pg(l_f, f[my_gid]);
+
+	    if(ul_cmp_ui(l_f, 1) != 0) {
+        }
+        else {
+	        ul l_X = { 0 };
+
+            mod nn = { 0 };
+            ul l_n = { 0 };
+
+	        ul_set_pg(l_X, X[my_gid]);
+            ul_set_pg(l_n, n[my_gid]);
+            mod_set(nn, l_n);
+
+	        pp1_stage2(l_f, l_X, nn, local_stage2_plan, local_S1, local_pairs);
+
+	        ul_set_gp(f[my_gid], l_f);
+	        ul_set_gp(X[my_gid], l_X);
+        }
+    }
+}
+
+
+
+
+/***********************************************************
+ *                                                         *
+ * P - 1                                                   *
+ *                                                         *
+ ***********************************************************/
+
+__kernel void kern_pm1_reorder(__global int *perm,
+                               __global ul *in_f,
+                               __global ul *out_f,
+                               __global ul *in_X,
+                               __global ul *out_X,
+                               __global ul *in_n,
+                               __global ul *out_n,
+                               int n_batch) {
+    kern_pp1_reorder(perm, in_f, out_f, in_X, out_X, in_n, out_n, n_batch);
+}
+
+
+__kernel void kern_pm1_stage1(__global ul *f,
+                              __global ul *X,
+                              __global ul *n,
+                              __global pm1_plan_t *plan,
+                              __local pm1_plan_t *local_plan,
+                              __global uint64_t *E,
+                              __local uint64_t *local_E,
+                              int n_batch) {
+    if (get_local_id(0) == 0) {
+        /* copy the plan to local mem */
+        local_plan->E_mask = plan->E_mask;
+        local_plan->E_n_words = plan->E_n_words;
+        local_plan->exp2 = plan->exp2;
+        local_plan->B1 = plan->B1;
+        local_plan->B2 = plan->B2;
+
+        for (int i = 0; i < local_plan->E_n_words; i++)
+            local_E[i] = E[i];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+	int my_gid = get_global_id(0);
+    if (my_gid < n_batch) {
+	    ul l_f = { 0 };
+        ul_set_ui(l_f, 1);
+	    ul l_X = { 0 };
+
+	    mod nn = { 0 };
+	    ul l_n = { 0 };
+        ul_set_pg(l_n, n[my_gid]);
+	    mod_set(nn, l_n);
+        
+	    pm1_stage1(l_f, l_X, nn, local_plan, local_E);
+	    if (ul_cmp(l_f, l_n) == 0)
+	        ul_set_ui(l_f, 1);
+	
+	    ul_set_gp(f[my_gid], l_f);
+	    ul_set_gp(X[my_gid], l_X);
+    }
+}
+
+
+
+__kernel void kern_pm1_stage2(__global ul *f,
+							  __global ul *X,
+							  __global ul *n,
+							  
+							  __global stage2_plan_t *stage2_plan,
+							  __local stage2_plan_t *local_stage2_plan,
+							  __global uint32_t *S1,
+							  __local uint32_t *local_S1,
+							  __global unsigned char *pairs,
+							  __local unsigned char *local_pairs,
+							  int n_batch) {
+    kern_pp1_stage2(f, X, n, stage2_plan, local_stage2_plan, S1, local_S1, pairs, local_pairs, n_batch);
+}
+
+
+
+
+

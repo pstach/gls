@@ -1,0 +1,634 @@
+
+#include "tests.hl"
+
+
+/*
+ * Kernel for randomly seeding two buffers
+ */
+__kernel void kern_ul_rand_seed_two(__global ul *dst1, __global ul *dst2, int num_elements, int seed_offset) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+	
+	struct rng_t r;
+	rand_init(seed_offset + my_gid, &r);
+	
+	ul l_dst1;
+	ul l_dst2;
+	ul_rand(&r, l_dst1);
+	ul_rand(&r, l_dst2);
+	ul_set_gp(dst1[my_gid], l_dst1);
+	ul_set_gp(dst2[my_gid], l_dst2);
+}
+
+
+/*
+ * Kernel for randomly seeding three buffers, where the first two
+ * values are both less-than the third. Very handy for testing
+ * the mod functions. Asserts that dst3 is the largest of the values,
+ * and that dst3->x[0] & 1 == 1 (ie, dst3 is odd).
+ */
+__kernel void kern_ul_rand_seed_three(__global ul *dst1, __global ul *dst2, __global ul *dst3, int num_elements, int seed_offset) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	struct rng_t r;
+	rand_init(seed_offset + my_gid, &r);
+
+	ul l_dst1;
+	ul l_dst2;
+	ul l_dst3;
+	ul_rand(&r, l_dst1);
+	ul_rand(&r, l_dst2);
+	ul_rand(&r, l_dst3);
+	
+	l_dst1->x[limbs-1] &= 0x7fffffff;
+	l_dst2->x[limbs-1] &= 0x7fffffff;
+	l_dst3->x[limbs-1] &= 0x7fffffff;
+		
+	if ((ul_cmp(l_dst1, l_dst2) > 0) &&
+	    (ul_cmp(l_dst1, l_dst3) > 0)) {
+	    	l_dst1->x[0] |= (1);
+			ul_set_gp(dst1[my_gid], l_dst2);
+			ul_set_gp(dst2[my_gid], l_dst3);
+			ul_set_gp(dst3[my_gid], l_dst1);
+	}
+	else if ((ul_cmp(l_dst2, l_dst1) > 0) &&
+	         (ul_cmp(l_dst2, l_dst3) > 0)) {
+	        l_dst2->x[0] |= (1);
+			ul_set_gp(dst1[my_gid], l_dst3);
+			ul_set_gp(dst2[my_gid], l_dst1);
+			ul_set_gp(dst3[my_gid], l_dst2);
+	}
+	else /* ((ul_cmp(l_dst3, l_dst1) > 0) &&
+	         (ul_cmp(l_dst3, l_dst2) > 0)) */ {
+	        l_dst3->x[0] |= (1);
+			ul_set_gp(dst1[my_gid], l_dst1);
+			ul_set_gp(dst2[my_gid], l_dst2);
+			ul_set_gp(dst3[my_gid], l_dst3);
+	}
+}
+
+
+/*
+ * Test kernel for ul_add
+ */
+#if TESTOP_SET & TESTOP_ADD
+__kernel void kern_ul_add_test(__global ul *dst, __global ul *src1, __global ul *src2, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+
+	ul_add(l_dst, l_src1, l_src2);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ul_sub
+ */
+#if TESTOP_SET & TESTOP_SUB
+__kernel void kern_ul_sub_test(__global ul *dst, __global ul *src1, __global ul *src2, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+
+    ul_set_pg(l_src1, src1[my_gid]);
+    ul_set_pg(l_src2, src2[my_gid]);
+
+	ul_sub(l_dst, l_src1, l_src2);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ul_mul
+ */
+#if TESTOP_SET & TESTOP_MUL
+__kernel void kern_ul_mul_test(__global ul *dst, __global ul *src1, __global ul *src2, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+
+	ul_mul(l_dst, l_src1, l_src2);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ul_divrem
+ */
+#if TESTOP_SET & TESTOP_DIVREM
+__kernel void kern_ul_divrem_test(__global ul *dst1, __global ul *dst2, __global ul *src1, __global ul *src2, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst1;
+	ul l_dst2;
+	ul l_src1;
+	ul l_src2;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+	
+	#if limbs >= 2
+	int lz = my_gid % (limbs - 1);
+	for (int i = 0; i < lz; i++)
+		l_src2->x[limbs - 1 - i] = 0;
+	ul_set_gp(src2[my_gid], l_src2);
+	#endif
+
+	ul_divrem(l_dst1, l_dst2, l_src1, l_src2);
+
+	ul_set_gp(dst1[my_gid], l_dst1);
+	ul_set_gp(dst2[my_gid], l_dst2);
+}
+#endif
+
+
+/*
+ * Test kernel for ul_cmp
+ */
+#if TESTOP_SET & TESTOP_CMP
+__kernel void kern_ul_cmp_test(__global int *dst, __global ul *src1, __global ul *src2, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	int l_dst;
+	ul l_src1;
+	ul l_src2;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+
+	l_dst = ul_cmp(l_src1, l_src2);
+	dst[my_gid] = l_dst;
+}
+#endif
+
+
+/*
+ * Test kernel for ul_cmp_ui
+ */
+#if TESTOP_SET & TESTOP_CMP
+__kernel void kern_ul_cmp_ui_test(__global int *dst, __global uint32_t *src2_ui, __global ul *src1, __global ul *src2, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	int l_dst;
+	ul l_src1;
+	uint32_t l_src2_ui;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	l_src2_ui = src2[my_gid]->x[0];
+
+	int i = limbs - 1;
+	while (i > (my_gid % limbs)) {
+		l_src1->x[i] = 0;
+		i--;
+	}
+
+	l_dst = ul_cmp_ui(l_src1, l_src2_ui);
+
+	dst[my_gid] = l_dst;
+	ul_set_gp(src1[my_gid], l_src1);
+	src2_ui[my_gid] = l_src2_ui;
+}
+#endif
+
+
+/*
+ * Test kernel for ulmod_add
+ */
+#if TESTOP_SET & TESTOP_MODADD
+__kernel void kern_mod_add_test(__global ul *dst, __global ul *src1, __global ul *src2, __global ul *n, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+	ul l_n;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+	ul_set_pg(l_n, n[my_gid]);
+
+	mod modulus;
+	mod_set(modulus, l_n);
+	ul_modadd(l_dst, l_src1, l_src2, modulus);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ulmod_sub
+ */
+#if TESTOP_SET & TESTOP_MODSUB
+__kernel void kern_mod_sub_test(__global ul *dst, __global ul *src1, __global ul *src2, __global ul *n, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+	ul l_n;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+	ul_set_pg(l_n, n[my_gid]);
+
+	mod modulus;
+	mod_set(modulus, l_n);
+	ul_modsub(l_dst, l_src1, l_src2, modulus);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ulmod_mul
+ */
+#if TESTOP_SET & TESTOP_MODMUL
+__kernel void kern_mod_mul_test(__global ul *dst, __global ul *src1, __global ul *src2, __global ul *n, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+	ul l_n;
+
+    ul_set_pg(l_src1, src1[my_gid]);
+    ul_set_pg(l_src2, src2[my_gid]);
+
+	ul_set_pg(l_n, n[my_gid]);
+
+	mod modulus;
+	mod_set(modulus, l_n);
+	ul_modmul(l_dst, l_src1, l_src2, modulus);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ulmod_mul, performing montgomery conversion
+ */
+#if TESTOP_SET & TESTOP_MODMUL2
+__kernel void kern_mod_mul_test2(__global ul *dst, __global ul *src1, __global ul *src2, __global ul *n, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_src2;
+	ul l_n;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_src2, src2[my_gid]);
+	ul_set_pg(l_n, n[my_gid]);
+
+	mod modulus;
+	mod_set(modulus, l_n);
+	
+	ul_to_montgomery(l_src1, l_src1, modulus);
+	ul_to_montgomery(l_src2, l_src2, modulus);
+	ul_modmul(l_dst, l_src1, l_src2, modulus);
+	ul_from_montgomery(l_dst, l_dst, modulus);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Test kernel for ulmod_inv
+ */
+#if TESTOP_SET & TESTOP_MODINV
+__kernel void kern_mod_inv_test(__global ul *dst, __global ul *src1, __global ul *n, int num_elements) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+
+	ul l_dst;
+	ul l_src1;
+	ul l_n;
+
+	ul_set_pg(l_src1, src1[my_gid]);
+	ul_set_pg(l_n, n[my_gid]);
+
+	ul_modinv(l_dst, l_src1, l_n);
+
+	ul_set_gp(dst[my_gid], l_dst);
+}
+#endif
+
+
+/*
+ * Cofactorization kernels
+ */
+
+
+#if TESTOP_SET & (TESTOP_PM1 | TESTOP_PP1)
+#include "../../../../include/ocl/cofact/pm1_common.hl"
+#include "../../../../include/ocl/cofact/pp1_common.hl"
+
+__kernel void kern_pm1pp1_reorder(__global int *perm,
+                                  __global ul *in_f,
+								  __global ul *out_f,
+								  __global ul *in_X,
+								  __global ul *out_X,
+								  __global ul *in_m,
+								  __global ul *out_m,
+								  __global int *in_bt,
+								  __global int *out_bt,
+                                  int num_elements) {
+    int my_gid = get_global_id(0);
+
+    if (my_gid < num_elements) {
+        perm[my_gid] = my_gid;
+        ul_set_gg(out_f[my_gid], in_f[my_gid]);
+        ul_set_gg(out_X[my_gid], in_X[my_gid]);
+        ul_set_gg(out_m[my_gid], in_m[my_gid]);
+        out_bt[my_gid] = in_bt[my_gid];
+    }
+}
+#endif
+
+#if TESTOP_SET & TESTOP_PM1
+__kernel void kern_pm1_stage1(__global ul *f,
+							  __global ul *X,
+							  __global ul *m,
+							  __global pm1_plan_t *plan,
+							  __global uint64_t *E,
+							  __global int *bt,
+							  int num_elements,
+							  int seed_offset) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= num_elements)
+		return;
+	
+	struct rng_t r;
+	rand_init(seed_offset + my_gid, &r);
+	
+	mod mm = { 0 };
+	ul l_m = { 0 };
+	ul_rand(&r, l_m);
+	l_m->x[0] |= 1;    /* ensure odd modulus */
+	l_m->x[limbs-1] &= 0x7fffffff;
+	mod_set(mm, l_m);
+	
+	ul l_f = { 0 };
+	ul l_X = { 0 };
+	bt[my_gid] = pm1_stage1(l_f, l_X, mm, plan, E);
+	
+	ul_set_gp(f[my_gid], l_f);
+	ul_set_gp(X[my_gid], l_X);
+	ul_set_gp(m[my_gid], l_m);
+}
+
+__kernel void kern_pm1_stage2(__global ul *f,
+							  __global ul *X,
+							  __global ul *m,
+							  
+							  __global stage2_plan_t *stage2_plan,
+							  __global uint32_t *S1,
+							  __global unsigned char *pairs, 
+							  int global_work_size) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= global_work_size)
+		return;
+	
+	mod mm = { 0 };
+	ul l_m = { 0 };
+	ul_set_pg(l_m, m[my_gid]);
+	mod_set(mm, l_m);
+	
+	ul l_f = { 0 };
+	ul_set_pg(l_f, f[my_gid]);
+	ul l_X = { 0 };
+	ul_set_pg(l_X, X[my_gid]);
+	if(ul_cmp_ui(l_f, 1) != 0) {
+	}
+	else {
+		pp1_stage2(l_f, l_X, mm, stage2_plan, S1, pairs);
+	}
+
+	ul_set_gp(f[my_gid], l_f);
+	ul_set_gp(X[my_gid], l_X);
+}
+#endif /* TESTOP_PM1 */
+
+
+#if TESTOP_SET & TESTOP_PP1
+__kernel void kern_pp1_stage1(__global ul *f,
+							  __global ul *X,
+							  __global ul *m,
+							   
+							  __global pp1_plan_t *plan,
+							  __global uint8_t *bc,
+							   
+							  __global int *bt,
+							  int global_work_size,
+							  int seed_offset) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= global_work_size)
+		return;
+	
+	struct rng_t r;
+	rand_init(seed_offset + my_gid, &r);
+	
+	mod mm = { 0 };
+	ul l_m = { 0 };
+	ul_rand(&r, l_m);
+	l_m->x[0] |= 1;    /* ensure odd modulus */
+	l_m->x[limbs-1] &= 0x7fffffff;
+	mod_set(mm, l_m);
+	
+	ul l_f = { 0 };
+	ul l_X = { 0 };
+	bt[my_gid] = pp1_stage1(l_f, l_X, mm, plan, bc);
+
+	ul_set_gp(f[my_gid], l_f);
+	ul_set_gp(X[my_gid], l_X);
+	ul_set_gp(m[my_gid], l_m);
+}
+
+__kernel void kern_pp1_stage2(__global ul *f,
+							  __global ul *X,
+							  __global ul *m,
+							  
+							  __global stage2_plan_t *stage2_plan,
+							  __global uint32_t *S1,
+							  __global unsigned char *pairs, 
+							  int global_work_size) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= global_work_size)
+		return;
+	
+	mod mm = { 0 };
+	ul l_m = { 0 };
+	ul_set_pg(l_m, m[my_gid]);
+	mod_set(mm, l_m);
+	
+	ul l_f = { 0 };
+	ul_set_pg(l_f, f[my_gid]);
+	ul l_X = { 0 };
+	ul_set_pg(l_X, X[my_gid]);
+	if(ul_cmp_ui(l_f, 1) != 0) {
+	}
+	else {
+		pp1_stage2(l_f, l_X, mm, stage2_plan, S1, pairs);
+	}
+
+	ul_set_gp(f[my_gid], l_f);
+	ul_set_gp(X[my_gid], l_X);
+}
+#endif /* TESTOP_PP1 */
+
+#if TESTOP_SET & TESTOP_ECM
+#include "../../../../include/ocl/cofact/ecm_common.hl"
+
+__kernel void kern_ecm_reorder(__global int *perm,
+                               __global ul *in_f,
+							   __global ul *out_f,
+							   __global ellM_point_t *in_X,
+							   __global ellM_point_t *out_X,
+							   __global ul *in_b,
+							   __global ul *out_b,
+							   __global ul *in_m,
+							   __global ul *out_m,
+							   __global int *in_bt,
+							   __global int *out_bt,
+							   int num_elements) {
+    int my_gid = get_global_id(0);
+
+    if (my_gid < num_elements) {
+        perm[my_gid] = my_gid;
+        ul_set_gg(out_f[my_gid], in_f[my_gid]);
+        ul_set_gg(out_b[my_gid], in_b[my_gid]);
+        ul_set_gg(out_X[my_gid]->x, in_X[my_gid]->x);
+        ul_set_gg(out_X[my_gid]->z, in_X[my_gid]->z);
+        ul_set_gg(out_m[my_gid], in_m[my_gid]);
+        out_bt[my_gid] = in_bt[my_gid];
+    }
+}
+
+__kernel void kern_ecm_stage1(__global ul *f,
+							  __global ellM_point_t *X,
+							  __global ul *b,
+							  __global ul *m,
+							  __global int *bt,
+							   
+							  __global ecm_plan_t *plan,
+							  __global uint8_t *bc,
+
+							  int global_work_size,
+							  int seed_offset) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= global_work_size)
+		return;
+	
+	struct rng_t r;
+	rand_init(seed_offset + my_gid, &r);
+	
+	ul l_m = { 0 };
+	ul_rand(&r, l_m);
+	l_m->x[0] |= 1;    /* ensure odd modulus */
+	l_m->x[limbs-1] &= 0x7fffffff;
+	mod mm = { 0 };
+	mod_set(mm, l_m);
+	
+	ul l_f = { 0 };
+	ul l_b = { 0 };
+	ellM_point_t l_X = { 0 };
+	
+	bt[my_gid] = ecm_stage1(l_f, l_X, l_b, mm, plan, bc);
+
+	ul_set_gp(f[my_gid], l_f);
+	ul_set_gp(b[my_gid], l_b);
+	ul_set_gp(X[my_gid]->x, l_X->x);
+	ul_set_gp(X[my_gid]->z, l_X->z);
+	ul_set_gp(m[my_gid], l_m);
+}
+
+__kernel void kern_ecm_stage2(__global ul *f,
+							  __global ellM_point_t *X,
+							  __global ul *b,
+							  __global ul *m,
+							  __global int *bt,
+							  
+							  __global stage2_plan_t *stage2_plan,
+							  __global uint32_t *S1,
+							  __global unsigned char *pairs,
+
+							  int global_work_size) {
+	int my_gid = get_global_id(0);
+	if (my_gid >= global_work_size)
+		return;
+	
+	ul l_m = { 0 };
+	ul_set_pg(l_m, m[my_gid]);
+
+	mod mm = { 0 };
+	mod_set(mm, l_m);
+	
+	ul l_f = { 0 };
+	ul l_b = { 0 };
+	ellM_point_t l_X = { 0 };
+	
+	ul_set_pg(l_f, f[my_gid]);
+	ul_set_pg(l_b, b[my_gid]);
+	ul_set_pg(l_X->x, X[my_gid]->x);
+	ul_set_pg(l_X->z, X[my_gid]->z);
+	
+	if(ul_cmp_ui(l_f, 1) != 0) {
+        bt[my_gid] = 0;
+	}
+	else {
+		bt[my_gid] = ecm_stage2(l_f, l_X, l_b, mm, stage2_plan, S1, pairs);
+	}
+
+	ul_set_gp(f[my_gid], l_f);
+	ul_set_gp(b[my_gid], l_b);
+	ul_set_gp(X[my_gid]->x, l_X->x);
+	ul_set_gp(X[my_gid]->z, l_X->z);
+}
+#endif /* TESTOP_ECM */
